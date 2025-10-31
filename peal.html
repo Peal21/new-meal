@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-time Duty Roster</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Font: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <!-- Firebase JS SDK -->
+    <script type="module">
+        // Firebase Imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getAuth, 
+            signInAnonymously, 
+            signInWithCustomToken, 
+            onAuthStateChanged 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            collection, 
+            addDoc, 
+            onSnapshot, 
+            doc, 
+            updateDoc, 
+            getDocs,
+            query,
+            setLogLevel
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Firebase Config (DO NOT EDIT) ---
+        let db, auth, userId, appId;
+
+        try {
+            const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+            appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            
+            if (!firebaseConfig.apiKey) {
+                throw new Error("Firebase config missing. Please set __firebase_config.");
+            }
+
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            setLogLevel('Debug');
+            console.log("Firebase Initialized. App ID:", appId);
+
+        } catch (error) {
+            console.error("Firebase Initialization Error:", error.message);
+            document.getElementById('app-content').innerHTML = `
+                <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg" role="alert">
+                  <strong class="font-bold">Error!</strong>
+                  <span class="block sm:inline">Firebase initialize hote shomossha hocche. Console dekhun.</span>
+                </div>`;
+            document.getElementById('loading-spinner').classList.add('hidden');
+        }
+        
+        // --- App State ---
+        let currentUserDocId = null;
+        let isLoggedIn = false;
+        let isAdminLoggedIn = false;
+        const BATCHES = ["10", "11", "12", "13", "14"];
+
+        // --- DOM Elements ---
+        const loadingSpinner = document.getElementById('loading-spinner');
+        const appContent = document.getElementById('app-content');
+        const authStatus = document.getElementById('auth-status');
+        
+        // Admin
+        const adminLoginBtn = document.getElementById('admin-login-btn');
+        const adminModal = document.getElementById('admin-login-modal');
+        const closeModalBtn = document.getElementById('close-modal-btn');
+        const adminLoginForm = document.getElementById('admin-login-form');
+        const adminLoginError = document.getElementById('admin-login-error');
+        const adminSection = document.getElementById('admin-section');
+        const adminLogoutBtn = document.getElementById('admin-logout-btn');
+
+        // Admin: Add User
+        const addUserForm = document.getElementById('add-user-form');
+        const newUserNameInput = document.getElementById('new-user-name');
+        const newUserBatchSelect = document.getElementById('new-user-batch');
+        const addUserMessage = document.getElementById('add-user-message');
+
+        // User: Login & Update
+        const userSelect = document.getElementById('user-select');
+        const updateSection = document.getElementById('update-section');
+        const statusLunchCheckbox = document.getElementById('status-lunch');
+        const statusDinnerCheckbox = document.getElementById('status-dinner');
+        const saveStatusBtn = document.getElementById('save-status-btn');
+        const saveMessage = document.getElementById('save-message');
+
+        // Roster Display
+        const rosterDisplayArea = document.getElementById('roster-display-area');
+        const downloadRosterBtn = document.getElementById('download-roster-btn');
+
+        // --- Functions ---
+
+        /**
+         * Formats the status array into HTML badges.
+         */
+        function formatStatus(statusArray) {
+            if (!statusArray || statusArray.length === 0) {
+                return '<span class="text-xs font-medium text-gray-500">N/A</span>';
+            }
+            return statusArray.map(status => {
+                if (status === 'Lunch') {
+                    return '<span class="inline-flex items-center rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-semibold text-blue-800 shadow-sm">Lunch</span>';
+                }
+                if (status === 'Dinner') {
+                    return '<span class="inline-flex items-center rounded-full bg-purple-100 px-2.5 py-0.5 text-xs font-semibold text-purple-800 shadow-sm">Dinner</span>';
+                }
+                return '';
+            }).join(' ');
+        }
+
+        /**
+         * Renders the batch cards in the main display area.
+         */
+        function renderBatchCards(groupedUsers) {
+            rosterDisplayArea.innerHTML = ''; // Clear previous render
+            
+            if (Object.keys(groupedUsers).length === 0) {
+                 rosterDisplayArea.innerHTML = `<p class="text-center text-gray-500 col-span-full">Kono user ekhono add kora hoyni.</p>`;
+                 return;
+            }
+
+            BATCHES.forEach(batch => {
+                const usersInBatch = groupedUsers[batch] || [];
+                
+                const card = document.createElement('div');
+                card.className = 'bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden';
+                
+                let userRows = '';
+                if (usersInBatch.length > 0) {
+                    usersInBatch.forEach(user => {
+                        userRows += `
+                            <tr class="hover:bg-gray-50">
+                                <td class="px-5 py-3.5 text-sm text-gray-900 font-semibold">${user.name}</td>
+                                <td class="px-5 py-3.5 text-sm text-gray-700 text-right">
+                                    <div class="flex justify-end items-center gap-2">
+                                        ${formatStatus(user.status)}
+                                    </div>
+                                </td>
+                            </tr>
+                        `;
+                    });
+                } else {
+                    userRows = '<tr><td colspan="2" class="px-5 py-4 text-sm text-gray-500 text-center italic">Ei batch-e kono user nei.</td></tr>';
+                }
+
+                card.innerHTML = `
+                    <div class="bg-gradient-to-r from-indigo-700 to-indigo-500 px-5 py-3">
+                        <h4 class="text-lg font-bold text-white">Batch ${batch}</h4>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <tbody class="divide-y divide-gray-200">
+                                ${userRows}
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+                rosterDisplayArea.appendChild(card);
+            });
+        }
+
+        /**
+         * Populates the user login dropdown, grouped by batch.
+         */
+        function populateUserDropdown(groupedUsers) {
+            userSelect.innerHTML = '<option value="">-- Apnar Naam Select Korun --</option>'; // Clear previous options
+            
+            BATCHES.forEach(batch => {
+                const usersInBatch = groupedUsers[batch] || [];
+                if (usersInBatch.length > 0) {
+                    const optgroup = document.createElement('optgroup');
+                    optgroup.label = `--- Batch ${batch} ---`;
+                    
+                    usersInBatch.forEach(user => {
+                        const option = document.createElement('option');
+                        option.value = user.id; // Store Firestore doc ID
+                        option.textContent = user.name;
+                        // Store user data in dataset for quick access
+                        option.dataset.statusLunch = user.status.includes('Lunch');
+                        option.dataset.statusDinner = user.status.includes('Dinner');
+                        optgroup.appendChild(option);
+                    });
+                    userSelect.appendChild(optgroup);
+                }
+            });
+        }
+        
+        /**
+         * Main function to fetch and display data in real-time.
+         */
+        async function setupRealtimeListener() {
+            if (!db || !userId) {
+                console.error("Firestore DB or UserID not available. Cannot setup listener.");
+                return;
+            }
+            
+            const usersCollectionPath = `artifacts/${appId}/users/${userId}/roster-users`;
+            const usersCollection = collection(db, usersCollectionPath);
+            const q = query(usersCollection); // Removed orderBy, sorting in JS
+
+            onSnapshot(q, (snapshot) => {
+                loadingSpinner.classList.add('hidden'); // Hide spinner on first load
+                appContent.classList.remove('opacity-0');
+
+                const users = [];
+                snapshot.forEach((doc) => {
+                    users.push({ id: doc.id, ...doc.data() });
+                });
+
+                // Sort users by name in JavaScript
+                users.sort((a, b) => a.name.localeCompare(b.name));
+
+                // Group users by batch
+                const groupedUsers = {};
+                users.forEach(user => {
+                    if (!groupedUsers[user.batch]) {
+                        groupedUsers[user.batch] = [];
+                    }
+                    groupedUsers[user.batch].push(user);
+                });
+
+                // Render UI Components
+                renderBatchCards(groupedUsers);
+                populateUserDropdown(groupedUsers);
+                
+                // Re-select current user if they were logged in
+                if(currentUserDocId) {
+                    userSelect.value = currentUserDocId;
+                }
+
+            }, (error) => {
+                console.error("Error fetching roster: ", error);
+                rosterDisplayArea.innerHTML = `<p class="text-center text-red-600 col-span-full">Data load korte error hocche.</p>`;
+                loadingSpinner.classList.add('hidden');
+            });
+        }
+        
+        // --- Authentication ---
+        function handleAuth() {
+            try {
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        console.log("User is signed in:", user.uid);
+                        userId = user.uid;
+                        authStatus.textContent = `User ID: ${userId.substring(0, 6)}...`;
+                        authStatus.classList.remove('bg-red-200', 'text-red-800');
+                        authStatus.classList.add('bg-green-200', 'text-green-800');
+                        
+                        // User is authenticated, now setup the listener
+                        await setupRealtimeListener();
+
+                    } else {
+                        console.log("User is signed out. Signing in...");
+                        authStatus.textContent = "Connecting...";
+                        authStatus.classList.remove('bg-green-200', 'text-green-800');
+                        authStatus.classList.add('bg-red-200', 'text-red-800');
+                        
+                        try {
+                            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                                console.log("Signing in with custom token...");
+                                await signInWithCustomToken(auth, __initial_auth_token);
+                            } else {
+                                console.log("Signing in anonymously...");
+                                await signInAnonymously(auth);
+                            }
+                            // onAuthStateChanged will be triggered again with the new user.
+                        } catch (authError) {
+                            console.error("Authentication Error:", authError);
+                            authStatus.textContent = "Authentication Failed";
+                        }
+                    }
+                });
+            } catch (e) {
+                console.error("Auth setup error:", e);
+                authStatus.textContent = "Auth Error";
+            }
+        }
+
+        // --- Event Listeners ---
+        
+        // Admin: Show Login Modal
+        adminLoginBtn.addEventListener('click', () => {
+            adminModal.classList.remove('hidden');
+        });
+
+        // Admin: Hide Login Modal
+        closeModalBtn.addEventListener('click', () => {
+            adminModal.classList.add('hidden');
+            adminLoginError.classList.add('hidden');
+        });
+
+        // Admin: Handle Login Form
+        adminLoginForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const id = e.target.adminId.value;
+            const pass = e.target.adminPass.value;
+
+            if (id === 'admin' && pass === 'admin123') {
+                isAdminLoggedIn = true;
+                adminSection.classList.remove('hidden');
+                adminModal.classList.add('hidden');
+                adminLoginError.classList.add('hidden');
+                adminLoginForm.reset();
+            } else {
+                adminLoginError.classList.remove('hidden');
+            }
+        });
+
+        // Admin: Handle Logout
+        adminLogoutBtn.addEventListener('click', () => {
+            isAdminLoggedIn = false;
+            adminSection.classList.add('hidden');
+        });
+
+        // Admin: Handle Add User Form
+        addUserForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!isAdminLoggedIn) {
+                addUserMessage.textContent = 'Admin login dorkar.';
+                addUserMessage.className = 'text-sm text-red-600 mt-2';
+                addUserMessage.classList.remove('hidden');
+                return;
+            }
+            
+            const name = newUserNameInput.value.trim();
+            const batch = newUserBatchSelect.value;
+
+            if (name && batch && userId) {
+                try {
+                    const usersCollectionPath = `artifacts/${appId}/users/${userId}/roster-users`;
+                    await addDoc(collection(db, usersCollectionPath), {
+                        name: name,
+                        batch: batch,
+                        status: [] // Initial status is an empty array
+                    });
+                    
+                    addUserMessage.textContent = 'User successsfully add kora hoyeche!';
+                    addUserMessage.className = 'text-sm text-green-600 mt-2';
+                    addUserMessage.classList.remove('hidden');
+                    addUserForm.reset();
+                    
+                } catch (error) {
+                    console.error("Error adding user: ", error);
+                    addUserMessage.textContent = 'Error: User add kora jayni.';
+                    addUserMessage.className = 'text-sm text-red-600 mt-2';
+                    addUserMessage.classList.remove('hidden');
+                }
+                setTimeout(() => addUserMessage.classList.add('hidden'), 3000);
+            }
+        });
+
+        // User: Handle Login (Select User)
+        userSelect.addEventListener('change', (e) => {
+            const selectedOption = e.target.options[e.target.selectedIndex];
+            const docId = selectedOption.value;
+
+            if (docId) {
+                // User is "logged in"
+                isLoggedIn = true;
+                currentUserDocId = docId;
+                
+                // Get status from dataset and set checkboxes
+                statusLunchCheckbox.checked = selectedOption.dataset.statusLunch === 'true';
+                statusDinnerCheckbox.checked = selectedOption.dataset.statusDinner === 'true';
+                
+                updateSection.classList.remove('hidden');
+                saveMessage.classList.add('hidden');
+                
+            } else {
+                // User is "logged out" or deselected
+                isLoggedIn = false;
+                currentUserDocId = null;
+                updateSection.classList.add('hidden');
+                saveMessage.classList.add('hidden');
+                
+                // Clear checkboxes
+                statusLunchCheckbox.checked = false;
+                statusDinnerCheckbox.checked = false;
+            }
+        });
+
+        // User: Handle Save Status
+        saveStatusBtn.addEventListener('click', async () => {
+            if (!isLoggedIn || !currentUserDocId || !userId) {
+                saveMessage.textContent = 'Please login korun.';
+                saveMessage.className = 'text-sm text-red-600 mt-2';
+                saveMessage.classList.remove('hidden');
+                return;
+            }
+
+            // Build status array from checkboxes
+            const newStatus = [];
+            if (statusLunchCheckbox.checked) {
+                newStatus.push('Lunch');
+            }
+            if (statusDinnerCheckbox.checked) {
+                newStatus.push('Dinner');
+            }
+
+            try {
+                const userDocRef = doc(db, `artifacts/${appId}/users/${userId}/roster-users`, currentUserDocId);
+                await updateDoc(userDocRef, {
+                    status: newStatus
+                });
+                
+                saveMessage.textContent = 'Status successsfully update hoyeche!';
+                saveMessage.className = 'text-sm text-green-600 mt-2';
+                saveMessage.classList.remove('hidden');
+
+            } catch (error) {
+                console.error("Error updating status: ", error);
+                saveMessage.textContent = 'Error: Status update hoyni.';
+                saveMessage.className = 'text-sm text-red-600 mt-2';
+                saveMessage.classList.remove('hidden');
+            }
+            setTimeout(() => saveMessage.classList.add('hidden'), 3000);
+        });
+        
+        // Feature: Download Roster
+        downloadRosterBtn.addEventListener('click', async () => {
+            if (!db || !userId) {
+                alert("Database connection nei.");
+                return;
+            }
+
+            let csvContent = "Batch,Name,Status\n";
+            try {
+                const usersCollectionPath = `artifacts/${appId}/users/${userId}/roster-users`;
+                const q = query(collection(db, usersCollectionPath)); // Removed orderBy
+                const querySnapshot = await getDocs(q);
+                
+                let users = [];
+                querySnapshot.forEach((doc) => {
+                    users.push(doc.data());
+                });
+
+                // Sort by batch, then by name (in JS)
+                users.sort((a, b) => {
+                    if (a.batch < b.batch) return -1;
+                    if (a.batch > b.batch) return 1;
+                    return a.name.localeCompare(b.name);
+                });
+
+                users.forEach(user => {
+                    const statusText = user.status.join(' & ') || 'N/A';
+                    csvContent += `${user.batch},${user.name},"${statusText}"\n`;
+                });
+
+                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                const link = document.createElement("a");
+                if (link.download !== undefined) {
+                    const url = URL.createObjectURL(blob);
+                    link.setAttribute("href", url);
+                    link.setAttribute("download", "duty_roster.csv");
+                    link.style.visibility = 'hidden';
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                }
+            } catch (error) {
+                console.error("Error generating CSV: ", error);
+                alert("CSV download kora jayni.");
+            }
+        });
+
+        // --- Start Application ---
+        if(db) {
+            handleAuth();
+        }
+
+    </script>
+    
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom styles for modal */
+        #admin-login-modal {
+            background-color: rgba(0, 0, 0, 0.5);
+            transition: opacity 0.3s ease;
+        }
+        /* Simple spinner */
+        .spinner {
+            border-top-color: #4f46e5;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        /* Hide scrollbar for roster area, but still scrollable */
+        .roster-grid-container::-webkit-scrollbar {
+            display: none;
+        }
+        .roster-grid-container {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+    </style>
+</head>
+
+<body class="bg-gray-100 min-h-screen">
+
+    <!-- Loading Spinner -->
+    <div id="loading-spinner" class="fixed inset-0 flex items-center justify-center bg-white z-50">
+        <div class="spinner w-12 h-12 border-4 border-gray-200 rounded-full"></div>
+    </div>
+
+    <!-- Admin Login Modal -->
+    <div id="admin-login-modal" class="hidden fixed inset-0 z-40 flex items-center justify-center p-4">
+        <div class="bg-white rounded-lg shadow-2xl p-6 w-full max-w-sm" @click.stop>
+            <div class="flex justify-between items-center border-b pb-3 mb-4">
+                <h3 class="text-xl font-bold text-gray-900">Admin Login</h3>
+                <button id="close-modal-btn" class="text-gray-400 hover:text-gray-600">&times;</button>
+            </div>
+            <form id="admin-login-form" class="space-y-4">
+                <div>
+                    <label for="adminId" class="block text-sm font-medium text-gray-700">Admin ID</label>
+                    <input type="text" id="adminId" value="admin" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <div>
+                    <label for="adminPass" class="block text-sm font-medium text-gray-700">Password</label>
+                    <input type="password" id="adminPass" value="admin123" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <p id="admin-login-error" class="text-sm text-red-600 hidden">Invalid ID or Password.</p>
+                <button type="submit" class="w-full bg-indigo-600 text-white py-2 px-4 rounded-md font-semibold hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Login</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Main Content (Hidden until loaded) -->
+    <div id="app-content" class="opacity-0 transition-opacity duration-500">
+        <!-- Header -->
+        <header class="bg-white shadow-md border-b border-gray-200">
+            <div class="container mx-auto px-4 sm:px-6 lg:px-8 max-w-7xl">
+                <div class="flex justify-between items-center h-16">
+                    <h1 class="text-2xl font-extrabold text-indigo-700">Duty Roster Dashboard</h1>
+                    <div class="flex items-center gap-4">
+                         <span id="auth-status" class="text-xs font-mono px-2 py-0.5 rounded-md"></span>
+                        <button id="admin-login-btn" class="bg-gray-800 text-white py-2 px-4 rounded-lg font-semibold text-sm hover:bg-gray-900 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 shadow-md">
+                            Admin Login
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Dashboard Grid -->
+        <main class="container mx-auto px-4 sm:px-6 lg:px-8 max-w-7xl py-8">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-8">
+                
+                <!-- Column 1: Controls -->
+                <div class="md:col-span-1 space-y-6">
+
+                    <!-- Admin: Add User Section (Hidden by default) -->
+                    <div id="admin-section" class="bg-white p-6 rounded-xl shadow-lg border border-gray-200 hidden">
+                        <div class="flex justify-between items-center border-b border-gray-200 pb-3 mb-4">
+                            <h3 class="text-xl font-bold text-gray-900">Admin Panel</h3>
+                            <button id="admin-logout-btn" class="text-sm text-red-600 hover:text-red-800 font-medium">Logout</button>
+                        </div>
+                        <p class="text-sm text-gray-600 mb-5">Notun user ekhane add korun.</p>
+                        <form id="add-user-form" class="space-y-4">
+                            <div>
+                                <label for="new-user-name" class="block text-sm font-medium text-gray-700">User Name</label>
+                                <input type="text" id="new-user-name" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            </div>
+                            <div>
+                                <label for="new-user-batch" class="block text-sm font-medium text-gray-700">Batch</label>
+                                <select id="new-user-batch" required class="mt-1 block w-full px-3 py-2 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                                    <option value="">Batch Select Korun</option>
+                                    <option value="10">10</option>
+                                    <option value="11">11</option>
+                                    <option value="12">12</option>
+                                    <option value="13">13</option>
+                                    <option value="14">14</option>
+                                </select>
+                            </div>
+                            <button type="submit" class="w-full bg-emerald-600 text-white py-2 px-4 rounded-md font-semibold hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500">
+                                User Jog Korun
+                            </button>
+                            <p id="add-user-message" class="text-sm text-green-600 mt-2 hidden"></p>
+                        </form>
+                    </div>
+
+                    <!-- User: Login & Update Section -->
+                    <div class="bg-white p-6 rounded-xl shadow-lg border border-gray-200 sticky top-8">
+                        <h3 class="text-xl font-bold mb-4 border-b border-gray-200 pb-3 text-gray-900">User Login & Update</h3>
+                        
+                        <!-- Login (Select User) -->
+                        <div>
+                            <label for="user-select" class="block text-sm font-medium text-gray-700">Step 1: Apnar Naam Select Korun</label>
+                            <select id="user-select" class="mt-1 block w-full px-3 py-2.5 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                                <option value="">-- Apnar Naam Select Korun --</option>
+                                <!-- Options populated by JS -->
+                            </select>
+                        </div>
+
+                        <!-- Update Status (Hidden by default) -->
+                        <div id="update-section" class="mt-6 hidden">
+                            <h4 class="block text-sm font-medium text-gray-700 mb-3">Step 2: Apnar Status Update Korun</h4>
+                            <fieldset class="space-y-3">
+                                <div class="relative flex items-start">
+                                    <div class="flex h-6 items-center">
+                                        <input id="status-lunch" name="status-lunch" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-600">
+                                    </div>
+                                    <div class="ml-3 text-sm leading-6">
+                                        <label for="status-lunch" class="font-medium text-gray-900">Lunch</label>
+                                    </div>
+                                </div>
+                                <div class="relative flex items-start">
+                                    <div class="flex h-6 items-center">
+                                        <input id="status-dinner" name="status-dinner" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-600">
+                                    </div>
+                                    <div class="ml-3 text-sm leading-6">
+                                        <label for="status-dinner" class="font-medium text-gray-900">Dinner</label>
+                                    </div>
+                                </div>
+                            </fieldset>
+                            <button id="save-status-btn" class="w-full bg-indigo-600 text-white py-2 px-4 rounded-md font-semibold hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 mt-5">
+                                Update Save Korun
+                            </button>
+                            <p id="save-message" class="text-sm text-green-600 mt-2 hidden"></p>
+                        </div>
+                    </div>
+
+                </div>
+                
+                <!-- Column 2: Main Roster Display -->
+                <div class="md:col-span-2 space-y-6">
+                    <div class="flex flex-wrap justify-between items-center gap-4 border-b border-gray-300 pb-4">
+                        <h3 class="text-2xl font-bold text-gray-900">Real-time Roster (Batch Wise)</h3>
+                        <button id="download-roster-btn" class="bg-indigo-600 text-white py-2 px-5 rounded-lg font-semibold text-sm hover:bg-indigo-700 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 shadow-md">
+                            Download Korte Click Korun
+                        </button>
+                    </div>
+
+                    <!-- Roster Grid Container -->
+                    <div id="roster-display-area" class="grid grid-cols-1 lg:grid-cols-2 gap-5 roster-grid-container">
+                        <!-- Batch cards populated by JS -->
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+</body>
+</html>
+
